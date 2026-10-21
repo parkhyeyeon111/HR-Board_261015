@@ -81,8 +81,8 @@
   ⚠ secret key(sb_secret_…)나 service_role 키는 절대 넣지 마세요. -->
 <script>
 window.HR_CONFIG = {
-  SUPABASE_URL: 'https://rqaacmctbjstwjhlqffd.supabase.co',
-  SUPABASE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJxYWFjbWN0YmpzdHdqaGxxZmZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwMDQ2MjYsImV4cCI6MjEwNzU4MDYyNn0.jLYgdTmT2Dcjnb82pI-zlG30uO-vRWlUQ6_Lg2alLBQ',
+  SUPABASE_URL: 'https://bbktiwnhslevdztsrxit.supabase.co',
+  SUPABASE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJia3Rpd25oc2xldmR6dHNyeGl0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwMDMwMzcsImV4cCI6MjEwNzU3OTAzN30.4IB6pIFYMy1J_b2pvYOgW9OXnOGpn1J4xBWTbtXKzKI',
   LOGIN_EMAIL_DOMAIN: 'cowave.kr',
 };
 </script>
@@ -131,6 +131,8 @@ var HREngine = (() => {
     inferYearFromText: () => inferYearFromText,
     isLikelyEmpNo: () => isLikelyEmpNo,
     isMetaRow: () => isMetaRow,
+    matchEmpKey: () => matchEmpKey,
+    matchMonthKey: () => matchMonthKey,
     mergeHrPayroll: () => mergeHrPayroll,
     monthOnly: () => monthOnly,
     nameExactKey: () => nameExactKey,
@@ -340,9 +342,19 @@ var HREngine = (() => {
   function normEmpNo(v) {
     if (v === null || v === void 0) return null;
     if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(v);
-    let s = String(v).normalize("NFKC").replace(/\s+/g, "").toUpperCase();
+    let s = String(v).normalize("NFKC").replace(/[\s\u200B-\u200D\u2060\uFEFF\u00AD]+/g, "").toUpperCase();
     if (/^\d+\.0+$/.test(s)) s = s.replace(/\.0+$/, "");
     return s || null;
+  }
+  function matchEmpKey(v) {
+    var _a;
+    const s = (_a = normEmpNo(v)) != null ? _a : "";
+    return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, "") : s;
+  }
+  function matchMonthKey(v) {
+    const t = String(v != null ? v : "").normalize("NFKC").trim();
+    const m = t.match(/^(\d{4})\s*[-./년]?\s*(\d{1,2})\s*월?$/);
+    return m && +m[2] >= 1 && +m[2] <= 12 ? `${m[1]}-${m[2].padStart(2, "0")}` : t;
   }
   var EMP_NO_PATTERN = /^(?=[^\d]*\d)[A-Z0-9][A-Z0-9_-]{0,19}$/;
   var isLikelyEmpNo = (s) => !!s && EMP_NO_PATTERN.test(s);
@@ -1068,7 +1080,7 @@ var HREngine = (() => {
   }
 
   // src/lib/parser/merge.ts
-  var k = (month, id) => `${month}|${id}`;
+  var k = (month, id) => `${matchMonthKey(month)}|${matchEmpKey(id)}`;
   function dedupHr(records) {
     var _a;
     const groups = /* @__PURE__ */ new Map();
@@ -1102,8 +1114,8 @@ var HREngine = (() => {
     const nameFallback = (_a = opts.nameFallback) != null ? _a : true;
     const { records: hr, duplicates } = dedupHr(hrRaw);
     const hrByKey = new Map(hr.map((h) => [k(h.pay_month, h.emp_no), h]));
-    const hrMonths = new Set(hr.map((h) => h.pay_month));
-    const hrEmpAnyMonth = new Set(hr.map((h) => h.emp_no));
+    const hrMonths = new Set(hr.map((h) => matchMonthKey(h.pay_month)));
+    const hrEmpAnyMonth = new Set(hr.map((h) => matchEmpKey(h.emp_no)));
     const usedHr = /* @__PURE__ */ new Set();
     const result = payroll.map((p) => {
       const h = hrByKey.get(k(p.pay_month, p.emp_no));
@@ -1112,7 +1124,7 @@ var HREngine = (() => {
         p,
         h != null ? h : null,
         h ? "emp_no" : "none",
-        h ? null : !hrMonths.has(p.pay_month) ? "no_hr_month" : hrEmpAnyMonth.has(p.emp_no) ? "other_month_only" : "not_found"
+        h ? null : !hrMonths.has(matchMonthKey(p.pay_month)) ? "no_hr_month" : hrEmpAnyMonth.has(matchEmpKey(p.emp_no)) ? "other_month_only" : "not_found"
       );
     });
     if (nameFallback) {
@@ -1457,8 +1469,45 @@ const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v)
 const toAccount = (p) => ({ uuid: p.id, id: p.username, email: p.email || '', name: p.name, role: p.role, grants: Array.isArray(p.grants) ? p.grants : [],
   createdAt: p.created_at, lastLoginAt: p.last_login_at });
 
+/** 첫 화면용 급여 '요약' 열 — 원본 세부 항목(items, 행당 수 KB)은 상세표·엑셀이 필요할 때 귀속월별로 따로 받음 */
+const PAY_SUMMARY_COLS = 'id,pay_month,emp_no,emp_name,pay_date,dept,site_code,taxable_amt,non_taxable_amt,gross_amt,bonus_amt,' +
+  'deduction_amt,net_pay_amt,pay_basis,business_unit,division,hq,emp_status,match_method,hr_emp_no,hr_name,unmatched_reason,file_name';
+
 const DB = {
-  /** 1,000행씩 끝까지 읽기 (Supabase API 는 한 번에 최대 1,000행) */
+  /**
+   * 많은 행 빠르게 읽기: 먼저 행 수를 세고, 1,000행 묶음을 동시에 6개씩 요청 (Supabase API 는 한 번에 최대 1,000행)
+   * order 는 순서가 고정되는 열(고유 키)이어야 묶음이 겹치거나 빠지지 않음
+   */
+  async many(table, { cols = '*', order = [], filter = null, onProgress = null, parallel = 6, key = null } = {}) {
+    let cq = sb().from(table).select(order[0] || 'pay_month', { count: 'exact', head: true });
+    if (filter) cq = filter(cq);
+    const { count, error } = await cq;
+    if (error) throw error;
+    const total = count || 0, pages = Math.ceil(total / 1000), parts = new Array(pages);
+    let done = 0, next = 0;
+    if (onProgress) onProgress(0, total);
+    const worker = async () => {
+      while (next < pages) {
+        const i = next++;
+        let q = sb().from(table).select(cols);
+        if (filter) q = filter(q);
+        order.forEach((o) => { q = q.order(o); });
+        const { data, error: e } = await q.range(i * 1000, i * 1000 + 999);
+        if (e) throw e;
+        parts[i] = data || []; done += parts[i].length;
+        if (onProgress) onProgress(done, total);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(parallel, Math.max(pages, 1)) }, worker));
+    const out = parts.flat();
+    // 검증: 서버가 알려준 행 수와 받은 '고유' 행 수가 같아야 함 (다르면 일부 행이 빠졌거나 겹친 것 → 그대로 쓰면 매칭이 틀어짐)
+    const uniq = key ? new Set(out.map(key)).size : out.length;
+    if (out.length !== total || uniq !== total) {
+      throw new Error(`서버의 ${table} ${total.toLocaleString()}행 중 ${uniq.toLocaleString()}행만 정확히 받아져 화면을 열지 않았습니다. 잠시 후 [다시 시도]를 눌러 주세요.`);
+    }
+    return out;
+  },
+  /** 1,000행씩 끝까지 읽기 (작은 표용) */
   async all(table, order, onProgress) {
     const out = [];
     for (let from = 0; ; from += 1000) {
@@ -1499,16 +1548,19 @@ const DB = {
 
 /** DB 행 → 화면·엔진 형태 */
 const payFromDb = (r) => ({ ...r, taxable_amt: num(r.taxable_amt) || 0, non_taxable_amt: num(r.non_taxable_amt) || 0, gross_amt: num(r.gross_amt) || 0,
-  bonus_amt: num(r.bonus_amt), deduction_amt: num(r.deduction_amt), net_pay_amt: num(r.net_pay_amt), items: r.items || {},
+  bonus_amt: num(r.bonus_amt), deduction_amt: num(r.deduction_amt), net_pay_amt: num(r.net_pay_amt), items: r.items,   // items: 처음엔 없음(undefined) → 필요할 때 채움
   match_status: r.match_method === 'none' ? 'payroll_only' : 'matched', _file: r.file_name, _row: 0 });
 const hrFromDb = (r) => ({ ...r, hire_date: null, cost_alloc: null, _file: r.file_name, _row: 0 });
 /** 저장용 행 (화면 전용 필드 제외) */
 const hrToDb = (x) => { const r = x.rec; return { emp_no: r.emp_no, emp_name: r.emp_name, pay_basis: r.pay_basis, business_unit: r.business_unit, division: r.division,
   hq: r.hq, emp_status: r.emp_status, emp_type: r.emp_type, company: r.company, dept: r.dept, file_name: x.file || r._file || null }; };
-const payToDb = (r) => ({ emp_no: r.emp_no, emp_name: r.emp_name, pay_date: r.pay_date, dept: r.dept, site_code: r.site_code,
+const payToDb = (r) => {
+  if (!r.items || typeof r.items !== 'object') throw new Error(`세부 급여 항목이 없는 행(${r.pay_month} ${r.emp_no})이 있어 저장을 중단했습니다. 새로고침 후 다시 시도해 주세요.`);   // 세부 항목 유실 방지
+  return { emp_no: r.emp_no, emp_name: r.emp_name, pay_date: r.pay_date, dept: r.dept, site_code: r.site_code,
   taxable_amt: r.taxable_amt, non_taxable_amt: r.non_taxable_amt, gross_amt: r.gross_amt, bonus_amt: r.bonus_amt, deduction_amt: r.deduction_amt,
   net_pay_amt: r.net_pay_amt, items: r.items, pay_basis: r.pay_basis, business_unit: r.business_unit, division: r.division, hq: r.hq,
-  emp_status: r.emp_status, match_method: r.match_method, hr_emp_no: r.hr_emp_no, hr_name: r.hr_name, unmatched_reason: r.unmatched_reason, file_name: r._file || null });
+  emp_status: r.emp_status, match_method: r.match_method, hr_emp_no: r.hr_emp_no, hr_name: r.hr_name, unmatched_reason: r.unmatched_reason, file_name: r._file || null };
+};
 
 /** 권한 판정 — DB RLS 함수 app.can_view(pay_month, pay_basis, business_unit, division) 와 같은 규칙
  *  조건 1개 안의 값들은 AND, 한 사람의 여러 조건은 OR, 귀속월 범위(month_from~month_to) 포함 */
@@ -1625,7 +1677,7 @@ const isXlsxNotReady = (e) => e && (e.code === 'XLSX_NOT_READY' || /XLSX_NOT_REA
    키 = 귀속월 | 사번  (사번이 없으면 귀속월 | 성명)
    규칙: 같은 키가 이미 있으면 '가장 나중에 저장한 파일'의 값으로 통째로 교체(Upsert), 없으면 추가. 다른 키는 절대 건드리지 않음. */
 const emptyStore = () => ({ hr: {}, pay: {}, catalog: {}, uploads: [], seq: 0 });
-const upsertKey = (r) => `${r.pay_month}|${r.emp_no ? 'E:' + r.emp_no : 'N:' + E.nameExactKey(r.emp_name)}`;
+const upsertKey = (r) => `${E.matchMonthKey(r.pay_month)}|${r.emp_no ? 'E:' + E.matchEmpKey(r.emp_no) : 'N:' + E.nameExactKey(r.emp_name)}`;
 const mergeColumns = (a, b) => E.unionColumns({ 0: a || [], 1: b || [] }, ['0', '1']);   // 원본 순서 유지 합집합
 
 /** 업로드 묶음을 저장소에 반영한 '새 저장소'와 파일별·귀속월별 신규/갱신 건수를 돌려줌 (원본 store 는 변경하지 않음) */
@@ -1776,7 +1828,7 @@ function makeSampleFiles() {
 
 /* ───────────────────────── ③ React 화면 ───────────────────────── */
 
-function Workspace({ me, welcome, accounts, onUpdateAccount, onLogout, onChangePassword, store, dbRows, catalog, onCommit, onDeleteMonth, onResetAll, invites, onSaveInvites, onDeleteInvite }) {
+function Workspace({ me, welcome, accounts, onUpdateAccount, onLogout, onChangePassword, store, dbRows, catalog, onCommit, onDeleteMonth, onResetAll, invites, onSaveInvites, onDeleteInvite, ensureItems }) {
   const [saving, setSaving] = useState(null);           // 저장 진행 문구 (null = 저장 중 아님)
   const [files, setFiles] = useState({ hr: [], pay: [] });
   const [catOverrides, setCatOverrides] = useState({});
@@ -1938,7 +1990,7 @@ function Workspace({ me, welcome, accounts, onUpdateAccount, onLogout, onChangeP
         <div className="mx-auto flex max-w-[1320px] flex-wrap items-end gap-x-6 px-5 pt-3">
           <div className="pb-3">
             <div className="text-[17px] font-bold tracking-tight">급여 · 인원 열람 대시보드</div>
-            <div className="text-xs text-muted">올린 파일은 이 탭 메모리에서만 처리되며 어디에도 전송·저장되지 않습니다</div>
+            <div className="text-xs text-muted">팀 공용 서버(Supabase)에 저장된 데이터를 내 권한 범위만큼 조회합니다</div>
           </div>
           <${EngineBadge} st=${xlsx} />
           <div className="order-last mb-3 flex w-full flex-wrap items-center justify-end gap-2 text-[13px] md:order-none md:ml-auto md:w-auto">
@@ -1977,7 +2029,7 @@ function Workspace({ me, welcome, accounts, onUpdateAccount, onLogout, onChangeP
             loadErrors=${loadErrors} dismissLoadError=${(n) => setLoadErrors((c) => c.filter((x) => x.name !== n))} nameFallback=${nameFallback} setNameFallback=${setNameFallback}
             catOverrides=${catOverrides} setCatOverrides=${setCatOverrides} onCommit=${commit}
             store=${store || emptyStore()} storeMatch=${storeMatch} preview=${preview} onResetAll=${resetAll} onDeleteMonth=${removeMonth} saving=${saving} />`}
-        ${tab === 'dash' && data && html`<${Dashboard} data=${data} scopeRows=${scopeRows} visibleMonths=${visibleMonths} viewer=${viewer}
+        ${tab === 'dash' && data && html`<${Dashboard} data=${data} ensureItems=${ensureItems} scopeRows=${scopeRows} visibleMonths=${visibleMonths} viewer=${viewer}
             months=${months} setMonths=${setMonths} filters=${filters} setFilters=${setFilters} groupBy=${groupBy} setGroupBy=${setGroupBy} setToast=${setToast} />`}
         ${tab === 'dash' && !data && html`<p className="rounded-md border border-rule bg-sheet px-4 py-10 text-center text-muted">
           ${isAdmin ? '아직 서버에 저장된 데이터가 없습니다. 업로드 · 검증 탭에서 파일을 올려 [누적 저장]을 눌러 주세요.' : '내 조회 범위 안에 아직 급여 데이터가 없습니다. 관리자가 데이터를 올리면 새로고침했을 때 여기에 표시됩니다.'}</p>`}
@@ -2540,7 +2592,7 @@ function MultiSelect({ label, hint, options, selected, onChange, allLabel = '전
     </details>`;
 }
 
-function Dashboard({ data, scopeRows, visibleMonths, viewer, months, setMonths, filters, setFilters, groupBy, setGroupBy, setToast }) {
+function Dashboard({ data, ensureItems, scopeRows, visibleMonths, viewer, months, setMonths, filters, setFilters, groupBy, setGroupBy, setToast }) {
   const inMonths = useMemo(() => scopeRows.filter((r) => months.includes(r.pay_month)), [scopeRows, months]);
   // 필터 선택지: 내가 볼 수 있는 행(권한 범위 ∩ 선택 귀속월)에 있는 값만
   const options = useMemo(() => {
@@ -2565,6 +2617,16 @@ function Dashboard({ data, scopeRows, visibleMonths, viewer, months, setMonths, 
   const locks = useMemo(() => grantLocks(viewer), [viewer]);
   const freeDims = DIMS.filter((d) => !locks[d.key]).map((d) => d.label);
   const columns = useMemo(() => E.unionColumns(data.catalog, months), [data.catalog, months]);
+  // 선택한 귀속월의 세부 급여 항목(기본급·식대·공제 등)은 이때 받음 → 첫 화면이 빨리 열림
+  const [itemsLoading, setItemsLoading] = useState(false);
+  useEffect(() => {
+    if (!ensureItems || !months.length) return;
+    let alive = true;
+    setItemsLoading(true);
+    ensureItems(months).catch((e) => setToast({ ok: false, text: '세부 항목을 불러오지 못했습니다: ' + koError(e) }))
+      .finally(() => { if (alive) setItemsLoading(false); });
+    return () => { alive = false; };
+  }, [months.join(',')]);   // eslint-disable-line
   const gl = DIMS.find((d) => d.key === groupBy).label;
 
   if (!visibleMonths.length) {
@@ -2677,7 +2739,7 @@ function Dashboard({ data, scopeRows, visibleMonths, viewer, months, setMonths, 
             </div>
           </section>
 
-          <${DetailTable} rows=${rows} columns=${columns} months=${months} filters=${filters} groupBy=${groupBy} viewer=${viewer} setToast=${setToast} reportExtra=${reportExtra} />
+          <${DetailTable} rows=${rows} columns=${columns} months=${months} filters=${filters} groupBy=${groupBy} viewer=${viewer} setToast=${setToast} reportExtra=${reportExtra} ensureItems=${ensureItems} itemsLoading=${itemsLoading} />
         <//>`}
     </div>`;
 }
@@ -2697,7 +2759,7 @@ function bonusKeysOf(catalog) {
 }
 /** 상여총액 = 급여대장 '상여총액' 열 값, 열이 없으면 상여·성과급 지급항목 합 */
 const bonusOf = (r, keys) => (typeof r.bonus_amt === 'number' ? r.bonus_amt
-  : keys ? [...keys].reduce((s, k) => s + (typeof r.items[k] === 'number' ? r.items[k] : 0), 0) : 0);
+  : keys && r.items ? [...keys].reduce((s, k) => s + (typeof r.items[k] === 'number' ? r.items[k] : 0), 0) : 0);
 
 /** 월별 추이: [{ month, heads, total, tax, ntax, bonus, ded, net, perHead, mom }] (귀속월 오름차순) */
 function monthlyTrend(rows, bonusKeys) {
@@ -2901,7 +2963,7 @@ function ShareTable({ share, dimLabel, onDrill, latest, prev }) {
 }
 
 /** 사원별 내역 — 급여대장의 모든 원본 열을 가로 스크롤로. 왼쪽 3열 고정, 머리글 2단(구분 + 항목명) */
-function DetailTable({ rows, columns, months, filters, groupBy, viewer, setToast, reportExtra }) {
+function DetailTable({ rows, columns, months, filters, groupBy, viewer, setToast, reportExtra, ensureItems, itemsLoading }) {
   const [cats, setCats] = useState({ summary: true, pay: true, deduction: true, info: false });
   const [hideEmpty, setHideEmpty] = useState(true);
   const [search, setSearch] = useState('');
@@ -2926,7 +2988,10 @@ function DetailTable({ rows, columns, months, filters, groupBy, viewer, setToast
     setBusy(true);
     try {
       const { scopeText, scopeShort, filterText } = exportMeta(viewer, months, filters);
-      const wb = E.buildPayrollWorkbook(rows, columns, { exportedBy: viewer.name, exportedAt: new Date(), scopeText, filterText, groupBy, label: lab });
+      // 엑셀에는 원본 세부 항목이 모두 들어가야 하므로, 아직 안 받은 달이 있으면 먼저 받아서 채움
+      const map = ensureItems ? await ensureItems(months) : null;
+      const full = map ? rows.map((r) => (r.items === undefined ? { ...r, items: map.get(r.id) || {} } : r)) : rows;
+      const wb = E.buildPayrollWorkbook(full, columns, { exportedBy: viewer.name, exportedAt: new Date(), scopeText, filterText, groupBy, label: lab });
       const extra = reportExtra ? reportExtra() : [];
       extra.forEach((x) => XLSX.utils.book_append_sheet(wb, x.ws, x.name));      // 보고용 시트: 월별 추이 · 조직별 비중
       const name = E.exportFileName(months, scopeShort);
@@ -2958,6 +3023,7 @@ function DetailTable({ rows, columns, months, filters, groupBy, viewer, setToast
         <button onClick=${exportXlsx} disabled=${busy || !rows.length}
           className="rounded bg-ledger px-3.5 py-1.5 text-[13.5px] font-semibold text-ledger-ink disabled:opacity-40">${busy ? '엑셀 만드는 중…' : '엑셀 다운로드'}</button>
       </div>
+      ${itemsLoading && html`<p role="status" className="mx-4 mb-2 rounded border border-sky bg-sky-tint px-3 py-1.5 text-[13px]">선택한 귀속월의 세부 급여 항목(기본급·식대·공제 등)을 불러오는 중입니다… 요약 금액은 이미 정확합니다.</p>`}
       <p className="px-4 pb-2.5 text-xs text-muted">엑셀에는 화면 표시와 관계없이 급여대장의 <b className="text-ink">모든 항목이 원본 순서대로</b> 들어갑니다. 지금 보는 사람의 권한 범위와 위 필터에 해당하는 사원만 포함됩니다.</p>
       <div ref=${wrap} className="max-h-[70vh] overflow-auto border-t border-soft">
         <table className="dt min-w-full border-separate border-spacing-0 text-[13px]">
@@ -2991,7 +3057,7 @@ function DetailTable({ rows, columns, months, filters, groupBy, viewer, setToast
                 <td className=${td} title=${r.match_method === 'name' ? '인원현황 사번 ' + r.hr_emp_no : ''}>
                   ${MATCH[r.match_method] && html`<span className=${cx('rounded px-1.5 py-0.5 text-xs font-medium', MATCH[r.match_method][1])}>${MATCH[r.match_method][0]}</span>`}</td>
                 ${shown.map((c) => {
-                  const v = r.items[c.key];
+                  const v = r.items ? r.items[c.key] : undefined;
                   return c.valueType === 'number'
                     ? html`<td key=${c.key} className=${cx(td, 'text-right', v === 0 && 'text-rule')}>${v == null ? '' : won(v)}</td>`
                     : html`<td key=${c.key} className=${td}>${v == null ? '' : String(v)}</td>`;
@@ -3371,6 +3437,8 @@ function App() {
   const [fatal, setFatal] = useState(null);
   const [invites, setInvites] = useState([]);              // 가입 예정자 (관리자만)
   const justSignedUp = useRef(false);
+  const itemsMap = useRef(new Map());                      // 급여 행 id → 세부 항목(items) — 필요할 때만 받아 모아 둠
+  const itemsMonths = useRef(new Set());                   // 세부 항목을 이미 받은 귀속월
 
   useEffect(() => {
     if (problem) return;
@@ -3399,17 +3467,21 @@ function App() {
       if (prof.role !== 'admin' && !prof.grants.length) { setDb({ status: 'ready', rows: [], catalog: {}, store: null, error: null, progress: '' }); return; }
       // 이미 화면이 떠 있으면(저장 후 다시 불러오기) 화면을 유지한 채 뒤에서 갱신, 처음이면 '불러오는 중' 화면
       setDb((d) => (d.status === 'ready' ? { ...d, error: null } : { ...d, status: 'loading', error: null, progress: '급여 데이터 불러오는 중…' }));
-      const [pay, cols] = await Promise.all([
-        DB.all('pay_rows', 'id', (n) => setDb((d) => (d.status === 'ready' ? d : { ...d, progress: `급여 데이터 불러오는 중… ${n.toLocaleString()}행` }))),
+      itemsMap.current = new Map(); itemsMonths.current = new Set();
+      const isAdmin = prof.role === 'admin';
+      const prog = (label) => (n, total) => setDb((d) => (d.status === 'ready' ? d : { ...d,
+        progress: total ? `${label} 불러오는 중… ${n.toLocaleString()} / ${total.toLocaleString()}행 (${Math.round((n / total) * 100)}%)` : `${label} 불러오는 중…` }));
+      // 첫 화면은 '요약 열'만 (세부 항목 61개는 상세표·엑셀이 필요할 때 귀속월별로) + 여러 묶음 동시 요청 + 관리자 표도 동시에
+      const [pay, cols, hr, logs] = await Promise.all([
+        DB.many('pay_rows', { cols: PAY_SUMMARY_COLS, order: ['id'], key: (r) => r.id, onProgress: prog('급여 데이터') }),
         DB.all('pay_columns', 'pay_month'),
+        // 인원현황은 반드시 '귀속월 + 사번'(고유 키) 순으로 나눠 받아야 빠지는 행이 없음 (이전 버전은 귀속월만 정렬 → 일부 누락)
+        isAdmin ? DB.many('hr_rows', { order: ['pay_month', 'emp_no'], key: (r) => `${r.pay_month}|${r.emp_no}` }) : Promise.resolve([]),
+        isAdmin ? DB.all('upload_log', 'id') : Promise.resolve([]),
       ]);
       const catalog = Object.fromEntries(cols.map((c) => [c.pay_month, c.columns]));
       const rows = pay.map(payFromDb);
-      let store = null;
-      if (prof.role === 'admin') {
-        const [hr, logs] = await Promise.all([DB.all('hr_rows', 'pay_month'), DB.all('upload_log', 'id')]);
-        store = storeFromDb(hr, rows, catalog, logs);
-      }
+      const store = isAdmin ? storeFromDb(hr, rows, catalog, logs) : null;
       setDb({ status: 'ready', rows, catalog, store, error: null, progress: '' });
     } catch (e) {
       if (db.status === 'ready') throw e;                // 화면이 떠 있는 상태의 재조회 실패는 호출한 쪽(저장 버튼 등)에서 안내
@@ -3420,6 +3492,22 @@ function App() {
     if (!uid) { setMe(null); setAccounts([]); setDb({ status: 'idle', rows: [], catalog: {}, store: null, error: null, progress: '' }); return; }
     loadAll(uid);
   }, [uid]);   // eslint-disable-line
+
+  /**
+   * 선택한 귀속월의 세부 급여 항목(items)을 받아 화면 행에 채움 (이미 받은 달은 건너뜀)
+   * 돌려주는 값: id → items 지도 (엑셀처럼 바로 써야 하는 곳에서 사용)
+   */
+  async function ensureItems(months) {
+    const need = [...new Set(months)].filter((m) => !itemsMonths.current.has(m));
+    if (need.length) {
+      const got = await DB.many('pay_rows', { cols: 'id,items', order: ['id'], key: (r) => r.id, filter: (q) => q.in('pay_month', need) });
+      got.forEach((r) => itemsMap.current.set(r.id, r.items || {}));
+      need.forEach((m) => itemsMonths.current.add(m));
+      const map = itemsMap.current;
+      setDb((d) => ({ ...d, rows: d.rows.map((r) => (r.items === undefined && map.has(r.id) ? { ...r, items: map.get(r.id) } : r)) }));
+    }
+    return itemsMap.current;
+  }
 
   const logout = async (msg) => { setPwOpen(false); try { await sb().auth.signOut(); } catch (e) { /* 무시 */ } setSession(null); setNotice(typeof msg === 'string' ? msg : null); };
 
@@ -3497,12 +3585,23 @@ function App() {
   /** 누적 저장: 이번에 바뀌는 귀속월만 '그 달 전체 상태'로 서버에 교체 (귀속월 단위로 한 번에 처리) */
   async function commitToDb(next, report, nameFallback, progress) {
     const months = [...new Set(report.flatMap((r) => Object.keys(r.byMonth)))].sort();
+    const hrMonths = new Set(report.filter((r) => r.kind === 'hr').flatMap((r) => Object.keys(r.byMonth)));
+    // 안전장치: 서버에서 요약만 받아 둔 기존 행은 세부 항목이 비어 있으므로, 저장 전에 그 달 세부 항목을 먼저 받아 채움
+    progress('기존 세부 항목 확인 중…');
+    const map = await ensureItems(months);
+    Object.values(next.pay).forEach((x) => x.rows.forEach((r) => { if (r.items === undefined && map.has(r.id)) r.items = map.get(r.id); }));
+    const bonusKeys = bonusKeysOf(next.catalog);
     const merged = matchStore(next, nameFallback);
     for (let i = 0; i < months.length; i++) {
       const mo = months[i];
       progress(`서버에 저장 중… ${mo} (${i + 1}/${months.length})`);
-      const hr = Object.values(next.hr).filter((x) => x.rec.pay_month === mo).map(hrToDb);
-      const pay = merged ? merged.merged.filter((r) => r.pay_month === mo).map(payToDb) : [];
+      // 인원현황은 '이번에 인원현황 파일을 올린 달'만 서버에 다시 씀. 급여만 올린 달은 서버 인원현황을 전혀 건드리지 않음(null)
+      const hr = hrMonths.has(mo) ? Object.values(next.hr).filter((x) => x.rec.pay_month === mo).map(hrToDb) : null;
+      const pay = merged ? merged.merged.filter((r) => r.pay_month === mo).map((r) => {
+        const row = payToDb(r);                              // 세부 항목이 없으면 여기서 저장을 멈춤 (유실 방지)
+        if (typeof row.bonus_amt !== 'number') row.bonus_amt = bonusOf(r, bonusKeys);   // 상여총액 열이 없던 파일은 상여·성과급 합으로 저장
+        return row;
+      }) : [];
       await DB.rpc('replace_month', { p_month: mo, p_hr: hr, p_pay: pay, p_columns: next.catalog[mo] || null });
     }
     progress('저장 이력 기록 중…');
@@ -3527,14 +3626,20 @@ function App() {
           if (p && (p.role === 'admin' || p.grants.length)) { setNotice('권한이 승인되었습니다.'); loadAll(uid); }
           else setNotice('아직 승인되지 않았습니다. 관리자에게 부문 권한을 요청해 주세요.'); }} />${dialog}<//>`;
   }
-  if (db.status === 'loading' || db.status === 'idle') return html`<p className="boot">${db.progress || '데이터를 불러오는 중…'}</p>`;
+  if (db.status === 'loading' || db.status === 'idle') {
+    const pct = (db.progress.match(/\((\d+)%\)/) || [])[1];
+    return html`<${AuthFrame}><div className="rounded-md border border-rule bg-sheet p-5 text-center text-[14px]" role="status" aria-live="polite">
+      <p>${db.progress || '데이터를 불러오는 중…'}</p>
+      <div className="mt-3 h-2 overflow-hidden rounded bg-soft"><div className="h-full bg-ledger transition-all" style=${{ width: `${pct || 8}%` }}></div></div>
+      <p className="mt-2 text-xs text-muted">요약 정보만 먼저 받아 화면을 엽니다. 사원별 세부 항목은 필요할 때 받습니다.</p></div><//>`;
+  }
   if (db.status === 'error') return html`<${AuthFrame}><div role="alert" className="rounded-md border border-bad bg-sheet p-5 text-[14px]"><b>데이터를 불러오지 못했습니다</b><p className="mt-1">${db.error}</p>
     <div className="mt-3 flex gap-2"><button className="rounded bg-ledger px-3 py-1.5 font-semibold text-ledger-ink" onClick=${() => loadAll(uid)}>다시 시도</button>
     <button className="rounded border border-rule px-3 py-1.5" onClick=${() => logout()}>로그아웃</button></div></div><//>`;
   return html`<${Fragment}>
     <${Workspace} key=${me.uuid} me=${me} welcome=${notice} accounts=${accounts} onUpdateAccount=${updateAccount} onLogout=${() => logout()}
       onChangePassword=${() => setPwOpen(true)} store=${db.store} dbRows=${db.rows} catalog=${db.catalog}
-      onCommit=${commitToDb} onDeleteMonth=${deleteMonthDb} onResetAll=${resetAllDb}
+      onCommit=${commitToDb} onDeleteMonth=${deleteMonthDb} onResetAll=${resetAllDb} ensureItems=${ensureItems}
       invites=${invites} onSaveInvites=${saveInvites} onDeleteInvite=${deleteInvite} />${dialog}<//>`;
 }
 
