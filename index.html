@@ -81,8 +81,8 @@
   ⚠ secret key(sb_secret_…)나 service_role 키는 절대 넣지 마세요. -->
 <script>
 window.HR_CONFIG = {
-  SUPABASE_URL: 'https://bbktiwnhslevdztsrxit.supabase.co',
-  SUPABASE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJia3Rpd25oc2xldmR6dHNyeGl0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwMDMwMzcsImV4cCI6MjEwNzU3OTAzN30.4IB6pIFYMy1J_b2pvYOgW9OXnOGpn1J4xBWTbtXKzKI',
+  SUPABASE_URL: 'https://rqaacmctbjstwjhlqffd.supabase.co',     // hr-board 프로젝트
+  SUPABASE_KEY: 'sb_publishable_vsVGC7lElBwuhLaXmRwFaw_BR_o50Yp',   // hr-board Publishable key
   LOGIN_EMAIL_DOMAIN: 'cowave.kr',
 };
 </script>
@@ -1432,16 +1432,32 @@ const PAGE = 100;
    · 저장·삭제·초기화·권한 변경은 DB 가 '관리자인지' 다시 확인 */
 const CFG = window.HR_CONFIG || {};
 const IDLE_MS = 30 * 60 * 1000;
+const projectRef = () => ((CFG.SUPABASE_URL || '').match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i) || [])[1] || '';
+/** eyJ… 형식(anon) 키 안에 적힌 프로젝트 ID·역할 읽기 (sb_publishable_ 키는 읽을 수 없음 → null) */
+function keyInfo(key) {
+  if (!/^eyJ/.test(key || '')) return null;
+  try { const p = JSON.parse(atob(key.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); return { ref: p.ref || '', role: p.role || '' }; }
+  catch (e) { return { ref: '', role: '' }; }
+}
 function configProblem() {
-  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(CFG.SUPABASE_URL || '')) return 'SUPABASE_URL 이 "https://프로젝트ID.supabase.co" 형식이 아닙니다. 대시보드 화면 주소가 아니라 API 주소(Project URL)를 넣어야 합니다.';
-  if (/^sb_secret_/.test(CFG.SUPABASE_KEY || '')) return 'SUPABASE_KEY 에 secret key 를 넣으면 안 됩니다. Publishable key(sb_publishable_…)로 바꿔 주세요.';
-  if (!/^(sb_publishable_|eyJ)/.test(CFG.SUPABASE_KEY || '')) return 'SUPABASE_KEY 에 Publishable key(sb_publishable_…)를 넣어 주세요.';
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(CFG.SUPABASE_URL || '')) return 'SUPABASE_URL 이 "https://프로젝트ID.supabase.co" 형식이 아닙니다. 대시보드 화면 주소가 아니라 API 주소(Project URL)를 넣어야 합니다. (끝에 /rest/v1/ 은 빼 주세요)';
+  if (/^sb_secret_/.test(CFG.SUPABASE_KEY || '')) return 'SUPABASE_KEY 에 secret key 를 넣으면 안 됩니다. Publishable key(sb_publishable_…) 또는 anon public 키(eyJ…)로 바꿔 주세요.';
+  if (!/^(sb_publishable_|eyJ)/.test(CFG.SUPABASE_KEY || '')) return 'SUPABASE_KEY 에 이 프로젝트의 Publishable key(sb_publishable_…) 또는 anon public 키(eyJ…)를 넣어 주세요. (Supabase → Project Settings → API Keys)';
+  const ki = keyInfo(CFG.SUPABASE_KEY);
+  if (ki && ki.role && ki.role !== 'anon') return `SUPABASE_KEY 가 '${ki.role}' 키입니다. 화면에 넣으면 안 되는 키이니 anon public 키로 바꿔 주세요.`;
+  if (ki && ki.ref && ki.ref !== projectRef()) return `SUPABASE_KEY 는 "${ki.ref}" 프로젝트의 키인데, SUPABASE_URL 은 "${projectRef()}" 프로젝트입니다. 두 값을 데이터가 있는 같은 프로젝트의 것으로 맞춰 주세요.`;
   if (!CFG.LOGIN_EMAIL_DOMAIN || /your-company|example\.|^test\.|localhost/i.test(CFG.LOGIN_EMAIL_DOMAIN)) return 'LOGIN_EMAIL_DOMAIN 을 실제 회사 메일 도메인(예: mycompany.co.kr)으로 바꿔 주세요.';
   return null;
 }
+/** 응답이 없을 때 무한 대기하지 않도록 시간 제한 */
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+/** 이 브라우저에 저장된 로그인 정보 지우기 */
+function clearSavedLogin() {
+  try { Object.keys(localStorage).filter((k) => /^hr-dashboard-auth|^sb-.*-auth-token/.test(k)).forEach((k) => localStorage.removeItem(k)); } catch (e) { /* 무시 */ }
+}
 let _sb = null;
 const sb = () => (_sb || (_sb = window.supabase.createClient(CFG.SUPABASE_URL.replace(/\/$/, ''), CFG.SUPABASE_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, storageKey: 'hr-dashboard-auth' } })));
+  auth: { persistSession: true, autoRefreshToken: true, storageKey: `hr-dashboard-auth-${projectRef()}` } })));
 const ID_RE = /^[a-z0-9][a-z0-9._-]{2,19}$/;
 const toEmail = (id) => (id.includes('@') ? id : `${id}@${CFG.LOGIN_EMAIL_DOMAIN}`);
 const pwProblem = (pw) => pw.length < 8 ? '비밀번호는 8자 이상이어야 합니다.' : !/[A-Za-z]/.test(pw) || !/\d/.test(pw) ? '비밀번호에 영문과 숫자를 모두 넣어 주세요.' : null;
@@ -3444,8 +3460,10 @@ function App() {
 
   useEffect(() => {
     if (problem) return;
-    sb().auth.getSession().then(({ data, error }) => { if (error) setFatal(koError(error)); setSession(data ? data.session : null); })
-      .catch((e) => { setFatal(koError(e)); setSession(null); });
+    // 10초 안에 응답이 없으면 멈춰 있지 않고 안내 (주소·키가 다른 프로젝트이거나 Supabase 장애일 때)
+    withTimeout(sb().auth.getSession(), 10000, 'TIMEOUT')
+      .then(({ data, error }) => { if (error) setFatal(koError(error)); setSession(data ? data.session : null); })
+      .catch((e) => { setFatal(e && e.message === 'TIMEOUT' ? 'TIMEOUT' : koError(e)); setSession(null); });
     const { data } = sb().auth.onAuthStateChange((_ev, s) => setSession(s));
     return () => data.subscription.unsubscribe();
   }, []);   // eslint-disable-line
@@ -3646,8 +3664,13 @@ function App() {
   async function resetAllDb() { await DB.rpc('reset_all'); await loadAll(uid); }
 
   if (problem) return html`<${SetupScreen} problem=${problem} />`;
-  if (fatal) return html`<${AuthFrame}><div role="alert" className="rounded-md border border-bad bg-sheet p-5 text-[14px]"><b>문제가 발생했습니다</b><p className="mt-1">${fatal}</p>
-    <button className="mt-3 rounded border border-rule px-3 py-1.5" onClick=${() => { setFatal(null); logout(); }}>로그인 화면으로</button></div><//>`;
+  if (fatal) return html`<${AuthFrame}><div role="alert" className="rounded-md border border-bad bg-sheet p-5 text-[14px]">
+    <b>${fatal === 'TIMEOUT' ? 'Supabase 서버가 응답하지 않습니다' : '문제가 발생했습니다'}</b>
+    <p className="mt-1">${fatal === 'TIMEOUT' ? html`연결 주소: <code>${CFG.SUPABASE_URL}</code><br />이 주소가 데이터를 넣은 프로젝트의 주소와 같은지 확인해 주세요. 같다면 Supabase 일시 장애일 수 있으니 잠시 후 다시 시도해 주세요.` : fatal}</p>
+    <div className="mt-3 flex flex-wrap gap-2">
+      <button className="rounded bg-ledger px-3 py-1.5 font-semibold text-ledger-ink" onClick=${() => location.reload()}>다시 시도</button>
+      <button className="rounded border border-rule px-3 py-1.5" onClick=${() => { clearSavedLogin(); location.reload(); }}>저장된 로그인 정보 지우고 다시 시도</button>
+    </div></div><//>`;
   if (session === undefined) return html`<p className="boot">로그인 상태를 확인하는 중…</p>`;
   const dialog = pwOpen && me && html`<${PasswordDialog} me=${me} forced=${false} weak=${pwOpen === 'weak'} onClose=${() => setPwOpen(false)} onSave=${changePassword} />`;
   if (!session) return html`<${AuthScreen} onLogin=${login} onSignup=${signup} notice=${notice} />`;
