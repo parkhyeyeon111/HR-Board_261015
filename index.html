@@ -352,9 +352,11 @@ var HREngine = (() => {
     return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, "") : s;
   }
   function matchMonthKey(v) {
-    const t = String(v != null ? v : "").normalize("NFKC").trim();
-    const m = t.match(/^(\d{4})\s*[-./년]?\s*(\d{1,2})\s*월?$/);
-    return m && +m[2] >= 1 && +m[2] <= 12 ? `${m[1]}-${m[2].padStart(2, "0")}` : t;
+    const r = parseMonth(v, null);
+    if (r.month) return r.month;
+    const mo = monthOnly(v);
+    if (mo !== null) return pad2(mo);
+    return String(v != null ? v : "").normalize("NFKC").trim();
   }
   var EMP_NO_PATTERN = /^(?=[^\d]*\d)[A-Z0-9][A-Z0-9_-]{0,19}$/;
   var isLikelyEmpNo = (s) => !!s && EMP_NO_PATTERN.test(s);
@@ -3582,32 +3584,63 @@ function App() {
     return saved;
   }
   async function deleteInvite(email) { await DB.deleteInvite(email); setInvites(await DB.invites()); }
-  /** 누적 저장: 이번에 바뀌는 귀속월만 '그 달 전체 상태'로 서버에 교체 (귀속월 단위로 한 번에 처리) */
+  /**
+   * 누적 저장 (서버 Upsert) — 서버의 기존 행은 지우지 않음
+   *   ① 이번에 올린 인원현황 행만 upsert_hr (같은 사번+귀속월은 갱신, 나머지 그대로)
+   *   ② 이번에 올린 급여 행만 upsert_pay (그 사번+귀속월 묶음만 교체, 같은 달 다른 사원 그대로)
+   *   ③ 인원현황이 바뀌어 매칭 결과가 달라진 '기존' 급여 행은 reclassify_pay 로 소속 열만 갱신 (세부 항목 그대로)
+   *   매칭 키 = 사번(공백 제거·대문자·숫자 사번 앞자리 0 무시) + 귀속월(YYYY-MM)
+   */
   async function commitToDb(next, report, nameFallback, progress) {
-    const months = [...new Set(report.flatMap((r) => Object.keys(r.byMonth)))].sort();
-    const hrMonths = new Set(report.filter((r) => r.kind === 'hr').flatMap((r) => Object.keys(r.byMonth)));
-    // 안전장치: 서버에서 요약만 받아 둔 기존 행은 세부 항목이 비어 있으므로, 저장 전에 그 달 세부 항목을 먼저 받아 채움
-    progress('기존 세부 항목 확인 중…');
-    const map = await ensureItems(months);
-    Object.values(next.pay).forEach((x) => x.rows.forEach((r) => { if (r.items === undefined && map.has(r.id)) r.items = map.get(r.id); }));
-    const bonusKeys = bonusKeysOf(next.catalog);
+    const baseSeq = db.store ? db.store.seq : 0;             // 이 값보다 큰 seq = 이번 업로드에서 들어온 행
+    const isNew = (x) => x.seq > baseSeq;
     const merged = matchStore(next, nameFallback);
-    for (let i = 0; i < months.length; i++) {
-      const mo = months[i];
-      progress(`서버에 저장 중… ${mo} (${i + 1}/${months.length})`);
-      // 인원현황은 '이번에 인원현황 파일을 올린 달'만 서버에 다시 씀. 급여만 올린 달은 서버 인원현황을 전혀 건드리지 않음(null)
-      const hr = hrMonths.has(mo) ? Object.values(next.hr).filter((x) => x.rec.pay_month === mo).map(hrToDb) : null;
-      const pay = merged ? merged.merged.filter((r) => r.pay_month === mo).map((r) => {
-        const row = payToDb(r);                              // 세부 항목이 없으면 여기서 저장을 멈춤 (유실 방지)
-        if (typeof row.bonus_amt !== 'number') row.bonus_amt = bonusOf(r, bonusKeys);   // 상여총액 열이 없던 파일은 상여·성과급 합으로 저장
+    const bonusKeys = bonusKeysOf(next.catalog);
+    const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+
+    // ① 인원현황
+    const hrNew = Object.values(next.hr).filter(isNew).map((x) => ({ ...hrToDb(x), pay_month: x.rec.pay_month }));
+    for (const [i, part] of chunk(hrNew, 1000).entries()) {
+      progress(`인원현황 저장 중… ${Math.min((i + 1) * 1000, hrNew.length).toLocaleString()} / ${hrNew.length.toLocaleString()}행`);
+      await DB.rpc('upsert_hr', { p_rows: part });
+    }
+    // ② 새 급여 행 (귀속월별로 나눠 보냄 — 같은 사번+귀속월 묶음이 한 번에 가도록)
+    const newPayKeys = new Set(Object.entries(next.pay).filter(([, x]) => isNew(x)).map(([k]) => k));
+    const payNew = merged ? merged.merged.filter((r) => newPayKeys.has(upsertKey(r))) : [];
+    const byMonth = {}; payNew.forEach((r) => (byMonth[r.pay_month] = byMonth[r.pay_month] || []).push(r));
+    const payMonths = Object.keys(byMonth).sort();
+    for (const [i, mo] of payMonths.entries()) {
+      progress(`급여 저장 중… ${mo} (${i + 1}/${payMonths.length})`);
+      const rows = byMonth[mo].map((r) => {
+        const row = { ...payToDb(r), pay_month: mo };
+        if (typeof row.bonus_amt !== 'number') row.bonus_amt = bonusOf(r, bonusKeys);   // 상여총액 열이 없던 파일은 상여·성과급 합으로
         return row;
-      }) : [];
-      await DB.rpc('replace_month', { p_month: mo, p_hr: hr, p_pay: pay, p_columns: next.catalog[mo] || null });
+      });
+      // 서버는 요청마다 (사번+귀속월) 묶음을 지우고 다시 넣으므로, 한 사원의 행(급여·상여 별도 지급 등)이 두 요청으로 갈라지면 안 됨
+      //  → 사원 단위로 묶은 뒤 약 1,500행씩 담아 보냄
+      const groups = new Map(); rows.forEach((r) => groups.set(r.emp_no, [...(groups.get(r.emp_no) || []), r]));
+      let part = [];
+      for (const g of groups.values()) {
+        if (part.length && part.length + g.length > 1500) { await DB.rpc('upsert_pay', { p_rows: part }); part = []; }
+        part.push(...g);
+      }
+      if (part.length) await DB.rpc('upsert_pay', { p_rows: part });
+      if (next.catalog[mo]) await DB.rpc('replace_month', { p_month: mo, p_hr: null, p_pay: null, p_columns: next.catalog[mo] });
+    }
+    // ③ 기존 급여 행의 매칭 결과(소속) 갱신 — 바뀐 것만
+    const CLS = ['pay_basis', 'business_unit', 'division', 'hq', 'emp_status', 'match_method', 'hr_emp_no', 'hr_name', 'unmatched_reason'];
+    const before = new Map(db.rows.map((r) => [r.id, r]));
+    const changed = merged ? merged.merged.filter((r) => r.id != null && before.has(r.id) && !newPayKeys.has(upsertKey(r)) &&
+      CLS.some((c) => (before.get(r.id)[c] ?? null) !== (r[c] ?? null))).map((r) => Object.fromEntries([['id', r.id], ...CLS.map((c) => [c, r[c] ?? null])])) : [];
+    for (const [i, part] of chunk(changed, 1000).entries()) {
+      progress(`기존 급여 매칭 결과 갱신 중… ${Math.min((i + 1) * 1000, changed.length).toLocaleString()} / ${changed.length.toLocaleString()}행`);
+      await DB.rpc('reclassify_pay', { p_rows: part });
     }
     progress('저장 이력 기록 중…');
     for (const r of report) await DB.rpc('log_upload', { p_kind: r.kind, p_file_name: r.fileName, p_by_month: r.byMonth });
     progress('서버에서 다시 불러오는 중…');
     await loadAll(uid);
+    return { hr: hrNew.length, pay: payNew.length, reclassified: changed.length };
   }
   async function deleteMonthDb(m) { await DB.rpc('delete_month', { p_month: m }); await loadAll(uid); }
   async function resetAllDb() { await DB.rpc('reset_all'); await loadAll(uid); }
